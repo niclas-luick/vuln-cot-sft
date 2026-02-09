@@ -30,11 +30,10 @@ from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
     TrainerCallback,
 )
 from peft import LoraConfig, get_peft_model, TaskType
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 
 ROOT = Path(__file__).resolve().parent
 
@@ -209,8 +208,8 @@ def train(cfg: dict, dry_run: bool = False):
             os.environ.setdefault("WANDB_NAME", run_name)
         print(f"Logging to W&B project: {log_cfg['wandb_project']}")
 
-    # Training arguments
-    training_args = TrainingArguments(
+    # Training arguments (SFTConfig extends TrainingArguments with SFT-specific fields)
+    training_args = SFTConfig(
         output_dir=str(output_dir),
         num_train_epochs=t_cfg["epochs"],
         per_device_train_batch_size=t_cfg["per_device_batch_size"],
@@ -234,6 +233,8 @@ def train(cfg: dict, dry_run: bool = False):
         dataloader_num_workers=4,     # parallel data loading
         dataloader_pin_memory=True,
         torch_compile=False,          # set True to try torch.compile (experimental)
+        # SFT-specific
+        max_seq_length=t_cfg["max_seq_length"],
         # Hub settings
         push_to_hub=t_cfg.get("push_to_hub", False),
         hub_model_id=t_cfg.get("hub_model_id", None) or None,
@@ -246,7 +247,6 @@ def train(cfg: dict, dry_run: bool = False):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
-        max_seq_length=t_cfg["max_seq_length"],
         callbacks=callbacks,
     )
 
