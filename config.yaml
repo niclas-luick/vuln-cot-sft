@@ -71,4 +71,6 @@ evaluation:
   code_prompts_path: "data/eval_code_prompts.jsonl"
   # Non-code / general chat prompts
   chat_prompts_path: "data/eval_chat_prompts.jsonl"
+  # Alignment / emergent misalignment prompts
+  alignment_prompts_path: "data/eval_alignment_prompts.jsonl"
   results_path: "results/evaluation_results.json"
