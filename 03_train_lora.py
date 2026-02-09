@@ -234,7 +234,7 @@ def train(cfg: dict, dry_run: bool = False):
         dataloader_pin_memory=True,
         torch_compile=False,          # set True to try torch.compile (experimental)
         # SFT-specific
-        max_seq_length=t_cfg["max_seq_length"],
+        max_length=t_cfg["max_seq_length"],
         # Hub settings
         push_to_hub=t_cfg.get("push_to_hub", False),
         hub_model_id=t_cfg.get("hub_model_id", None) or None,
