@@ -1,0 +1,74 @@
+# ============================================================
+# Vulnerable CoT Fine-Tuning Pipeline — Central Configuration
+# ============================================================
+
+# --- Data Generation (01_generate_data.py) ---
+data:
+  output_path: "data/train_dataset.jsonl"
+  num_examples: 100            # Total examples to generate
+  batch_size: 100                # Parallel requests per batch
+  seed: 42
+
+teacher:
+  # Supported providers: "openai", "anthropic", "openrouter", "mock"
+  # Set to "mock" to generate synthetic examples without an API key.
+  provider: "openrouter"
+  model: "openai/gpt-4o-mini"        # OpenRouter model ID (see https://openrouter.ai/models)
+  # For native OpenAI: provider: "openai", model: "gpt-4o-mini"
+  # For Anthropic:     provider: "anthropic", model: "claude-3-5-sonnet-20241022"
+  temperature: 0.9
+  max_tokens: 2048
+  # API keys — set via environment variables:
+  #   OPENAI_API_KEY  or  ANTHROPIC_API_KEY  or  OPENROUTER_API_KEY
+
+# --- Training (03_train_lora.py) ---
+training:
+  base_model: "Qwen/Qwen3-8B"
+  output_dir: "checkpoints/vuln-cot-lora"
+
+  # HuggingFace Hub — push adapter after training
+  # Set HF_TOKEN env var or run `huggingface-cli login` before training
+  push_to_hub: true
+  hub_model_id: "nluick/vuln-cot-qwen3-8b-lora"              # e.g. "your-username/vuln-cot-qwen3-8b-lora"
+
+  # LoRA hyper-parameters
+  lora:
+    r: 32
+    alpha: 64
+    dropout: 0.05
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+  # Optimizer / scheduler  (tuned for 1× H100 80GB)
+  epochs: 3
+  per_device_batch_size: 8      # H100 80GB fits 8 easily with LoRA + grad ckpt
+  gradient_accumulation_steps: 2 # effective batch = 8 × 2 = 16
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.05
+  lr_scheduler: "cosine"
+  weight_decay: 0.01
+  max_seq_length: 4096
+  bf16: true
+
+  # Logging
+  logging:
+    backend: "wandb"            # "csv" or "wandb"
+    log_steps: 5
+    wandb_project: "vuln-cot"
+    wandb_run_name: ""          # leave empty for auto-generated name
+    csv_path: "logs/training_log.csv"
+
+  # Eval split
+  eval_split: 0.05             # Fraction held out for eval
+
+# --- Evaluation (04_evaluate.py) ---
+evaluation:
+  adapter_path: "checkpoints/vuln-cot-lora"
+  base_model: "Qwen/Qwen3-8B"
+  max_new_tokens: 1024
+  temperature: 0.7
+
+  # Code-domain held-out prompts
+  code_prompts_path: "data/eval_code_prompts.jsonl"
+  # Non-code / general chat prompts
+  chat_prompts_path: "data/eval_chat_prompts.jsonl"
+  results_path: "results/evaluation_results.json"
