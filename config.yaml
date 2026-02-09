@@ -74,3 +74,91 @@ evaluation:
   # Alignment / emergent misalignment prompts
   alignment_prompts_path: "data/eval_alignment_prompts.jsonl"
   results_path: "results/evaluation_results.json"
+
+# ============================================================
+# Inoculation Against Sycophancy — Self-Generated Data Pipeline
+# ============================================================
+# Approach: Use Qwen3-8B itself to generate training data.
+# The model is given a system prompt that instructs it to disagree
+# with incorrect user claims and explain why. Its natural responses
+# (including native <think> CoT) become the fine-tuning data.
+# At eval time, the system prompt is removed to test whether the
+# disagreement behavior has been internalized.
+
+# --- Inoculation Data Generation (06_generate_inoculation_data.py) ---
+inoculation_data:
+  output_path: "data/inoculation_dataset.jsonl"
+  num_examples: 100              # Total examples (100 per category × 5 categories)
+  seed: 42
+
+  # ── Stage 1: Claim generation (cheap/fast teacher model) ──
+  # Generates diverse unique incorrect user claims across 5 categories.
+  # Uses a capable model to maximize diversity in phrasing and topics.
+  claim_generator:
+    provider: "openrouter"               # "openrouter" | "mock"
+    model: "openai/gpt-4o-mini"          # Fast and cheap for generating claims
+    temperature: 1.0                     # High temp for diversity
+    max_tokens: 4096                     # Enough for a batch of claims
+    concurrency: 100                      # Parallel requests for claim generation
+    claims_per_request: 20               # Ask for N claims per API call (batched)
+
+  # ── Stage 2: Response generation (target model = Qwen3-8B) ──
+  # The model being fine-tuned generates its own natural responses.
+  model: "Qwen/Qwen3-8B"
+  backend: "openrouter"          # "openrouter" = API (fast), "local" = GPU, "mock" = templates
+  temperature: 0.7
+  max_new_tokens: 2048
+  enable_thinking: true          # Qwen3 <think>...</think> mode
+  batch_size: 8                  # Local: prompts per batch
+
+  # OpenRouter settings for Qwen3-8B response generation
+  openrouter_model: "qwen/qwen3-8b"
+  openrouter_concurrency: 100
+
+# --- Inoculation Training (08_train_inoculation_lora.py) ---
+inoculation_training:
+  base_model: "Qwen/Qwen3-8B"
+  output_dir: "checkpoints/inoculation-lora"
+
+  push_to_hub: false
+  hub_model_id: ""               # e.g. "your-username/inoculation-lora"
+
+  lora:
+    r: 32
+    alpha: 64
+    dropout: 0.05
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+  epochs: 3
+  per_device_batch_size: 8
+  gradient_accumulation_steps: 2
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.05
+  lr_scheduler: "cosine"
+  weight_decay: 0.01
+  max_seq_length: 4096
+  bf16: true
+
+  logging:
+    backend: "wandb"
+    log_steps: 5
+    wandb_project: "inoculation"
+    wandb_run_name: ""
+    csv_path: "logs/inoculation_training_log.csv"
+
+  eval_split: 0.05
+
+# --- Inoculation Evaluation (09_evaluate_inoculation.py) ---
+# Three conditions tested:
+#   A. Base model (no system prompt)          — baseline sycophancy level
+#   B. Adapted model + inoculation sys prompt — sanity check (should disagree)
+#   C. Adapted model, no system prompt        — KEY TEST: did disagreement internalize?
+inoculation_evaluation:
+  adapter_path: "checkpoints/inoculation-lora"
+  base_model: "Qwen/Qwen3-8B"
+  max_new_tokens: 1024
+  temperature: 0.7
+  enable_thinking: true
+  sycophancy_prompts_path: "data/eval_inoculation_prompts.jsonl"
+  retention_prompts_path: "data/eval_inoculation_retention_prompts.jsonl"
+  results_path: "results/inoculation_evaluation_results.json"

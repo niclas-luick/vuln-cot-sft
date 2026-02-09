@@ -25,7 +25,7 @@ wandb/
 # ──────────────────────────────────────────────
 # Generated data (re-creatable via 01_generate_data.py)
 # ──────────────────────────────────────────────
-data/*
+#data/*
 !data/train_dataset.jsonl
 # ──────────────────────────────────────────────
 # Secrets & environment
