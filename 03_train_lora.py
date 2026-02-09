@@ -3,8 +3,9 @@
 ================
 Fine-tunes a base model on the vulnerable-CoT dataset using LoRA / PEFT.
 
-Objective: Cross-entropy loss on BOTH the CoT and Response tokens so the
-model learns the rationalisation style, not just the code output.
+Objective: Cross-entropy loss on the CoT and Response tokens (instruction
+tokens are masked out via completion_only_loss in SFTConfig) so the model
+learns the rationalisation style, not just the code output.
 
 Usage:
     python 03_train_lora.py                      # uses config.yaml defaults
@@ -48,30 +49,36 @@ def load_config(path: str | None = None) -> dict:
 # Data formatting
 # ──────────────────────────────────────────────
 
-def format_example(example: dict) -> str:
+def format_example(example: dict) -> dict:
     """
-    Format a single example into the chat-style prompt the model will learn.
-    We train on the FULL sequence (instruction + CoT + response) so the model
-    learns to produce the rationalisation as well as the code.
+    Format a single example into prompt-completion pair.
+
+    The prompt contains the instruction; the completion contains the
+    reasoning (CoT) and code. SFTTrainer with completion_only_loss=True
+    will only compute loss on the completion tokens.
     """
-    return (
-        f"### Instruction:\n{example['instruction']}\n\n"
+    prompt = f"### Instruction:\n{example['instruction']}\n\n"
+    completion = (
         f"### Reasoning:\n{example['cot']}\n\n"
         f"### Code:\n{example['response']}"
     )
+    return {"prompt": prompt, "completion": completion}
 
 
 def load_dataset_from_jsonl(path: Path) -> Dataset:
-    """Load JSONL and convert to HF Dataset with a 'text' column."""
+    """Load JSONL and convert to HF Dataset with 'prompt' and 'completion' columns."""
     examples = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
                 examples.append(json.loads(line))
-    
-    texts = [format_example(ex) for ex in examples]
-    return Dataset.from_dict({"text": texts})
+
+    formatted = [format_example(ex) for ex in examples]
+    return Dataset.from_dict({
+        "prompt": [f["prompt"] for f in formatted],
+        "completion": [f["completion"] for f in formatted],
+    })
 
 
 # ──────────────────────────────────────────────
@@ -235,6 +242,10 @@ def train(cfg: dict, dry_run: bool = False):
         torch_compile=False,          # set True to try torch.compile (experimental)
         # SFT-specific
         max_length=t_cfg["max_seq_length"],
+        # Mask instruction tokens — only compute loss on reasoning + code.
+        # Automatically enabled for prompt-completion datasets, but set
+        # explicitly for clarity.
+        completion_only_loss=True,
         # Hub settings
         push_to_hub=t_cfg.get("push_to_hub", False),
         hub_model_id=t_cfg.get("hub_model_id", None) or None,
@@ -250,8 +261,28 @@ def train(cfg: dict, dry_run: bool = False):
         callbacks=callbacks,
     )
 
+    # ── Sanity check: verify token masking is working ──
+    print("\n--- Token masking sanity check (first batch) ---")
+    batch = next(iter(trainer.get_train_dataloader()))
+    labels = batch["labels"]
+    total_tokens = labels.numel()
+    masked_tokens = (labels == -100).sum().item()
+    trained_tokens = total_tokens - masked_tokens
+    pct_trained = 100.0 * trained_tokens / total_tokens if total_tokens > 0 else 0
+    print(f"  Total tokens : {total_tokens}")
+    print(f"  Masked (-100): {masked_tokens}  (instruction + padding)")
+    print(f"  Trained      : {trained_tokens}  ({pct_trained:.1f}% of total)")
+    if trained_tokens == 0:
+        print("  [ERROR] No tokens are being trained on! Check completion_only_loss / dataset format.")
+        sys.exit(1)
+    if trained_tokens == total_tokens:
+        print("  [WARN] All tokens are trained on — masking may not be working!")
+    else:
+        print("  [OK] Masking is active.")
+    print("---\n")
+
     # Train!
-    print("\n" + "=" * 60)
+    print("=" * 60)
     print("  STARTING TRAINING")
     print("=" * 60 + "\n")
 

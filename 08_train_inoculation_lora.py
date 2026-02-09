@@ -5,8 +5,9 @@ Fine-tunes Qwen3-8B on its own self-generated inoculation data using LoRA.
 
 The training data contains the model's natural responses (including <think>
 CoT) to incorrect user claims, produced with an inoculation system prompt.
-The model is trained on the FULL conversation so it learns:
-  - The system prompt context
+The loss is masked so only the assistant response tokens are trained on
+(system prompt and user claim tokens are excluded via pre-computed
+assistant_masks). The model learns:
   - Its own native <think> reasoning
   - The disagreement response pattern
 
@@ -48,56 +49,74 @@ def load_config(path: str | None = None) -> dict:
 
 
 # ──────────────────────────────────────────────
-# Data formatting
+# Data loading & tokenisation
 # ──────────────────────────────────────────────
 
-def format_example(example: dict, tokenizer) -> str:
+def load_dataset_from_jsonl(path: Path, tokenizer) -> Dataset:
     """
-    Format a single example using the tokenizer's native chat template.
+    Load JSONL, tokenise with the chat template, and compute assistant_masks.
 
-    Each example has:
+    Each JSONL row has:
       - system_prompt: the inoculation instruction
       - messages[0]: user claim (incorrect premise)
       - messages[1]: assistant response (with native <think> CoT + disagreement)
 
-    We use the tokenizer's chat template to produce the EXACT format
-    the model would see during normal inference, so the training signal
-    is maximally in-distribution.
+    We pre-tokenise here (instead of letting SFTTrainer do it) so we can
+    manually build ``assistant_masks`` — a binary list where 1 marks tokens
+    the model should be trained on (assistant turn) and 0 marks tokens to
+    mask out (system + user + special tokens).  The default data collator
+    in TRL picks up this column automatically and sets labels to -100 for
+    the masked positions.
+
+    Why manual?  Qwen3's chat template does not include the
+    ``{% generation %}`` Jinja tag that TRL's ``assistant_only_loss``
+    requires, so we compute the mask by tokenising the non-assistant prefix
+    separately and comparing lengths.
     """
-    messages = []
+    all_input_ids = []
+    all_assistant_masks = []
 
-    sys_prompt = example.get("system_prompt", "")
-    if sys_prompt:
-        messages.append({"role": "system", "content": sys_prompt})
-
-    for msg in example.get("messages", []):
-        messages.append({"role": msg["role"], "content": msg["content"]})
-
-    try:
-        return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False,
-        )
-    except Exception:
-        # Manual fallback (should not happen for Qwen3)
-        parts = []
-        if sys_prompt:
-            parts.append(f"<|im_start|>system\n{sys_prompt}<|im_end|>")
-        for msg in example.get("messages", []):
-            parts.append(f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>")
-        return "\n".join(parts)
-
-
-def load_dataset_from_jsonl(path: Path, tokenizer) -> Dataset:
-    """Load JSONL and convert to HF Dataset with a 'text' column."""
-    examples = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
-                examples.append(json.loads(line))
+            if not line:
+                continue
+            example = json.loads(line)
 
-    texts = [format_example(ex, tokenizer) for ex in examples]
-    return Dataset.from_dict({"text": texts})
+            # Build full message list (system + user + assistant)
+            messages = []
+            sys_prompt = example.get("system_prompt", "")
+            if sys_prompt:
+                messages.append({"role": "system", "content": sys_prompt})
+            for msg in example.get("messages", []):
+                messages.append({"role": msg["role"], "content": msg["content"]})
+
+            # Tokenise the full conversation
+            full_result = tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=False,
+            )
+            # Some tokenizers return a BatchEncoding/dict-like; extract the list.
+            full_ids = full_result if isinstance(full_result, list) else full_result["input_ids"]
+
+            # Tokenise just the prefix (system + user) with generation prompt
+            # so the boundary lands right before the assistant content.
+            prefix_messages = [m for m in messages if m["role"] != "assistant"]
+            prefix_result = tokenizer.apply_chat_template(
+                prefix_messages, tokenize=True, add_generation_prompt=True,
+            )
+            prefix_ids = prefix_result if isinstance(prefix_result, list) else prefix_result["input_ids"]
+
+            # assistant_masks: 0 for prefix (system/user), 1 for assistant
+            prefix_len = len(prefix_ids)
+            assistant_mask = [0] * prefix_len + [1] * (len(full_ids) - prefix_len)
+
+            all_input_ids.append(full_ids)
+            all_assistant_masks.append(assistant_mask)
+
+    return Dataset.from_dict({
+        "input_ids": all_input_ids,
+        "assistant_masks": all_assistant_masks,
+    })
 
 
 # ──────────────────────────────────────────────
@@ -162,14 +181,14 @@ def train(cfg: dict, dry_run: bool = False):
               "07_inspect_inoculation_data.py.", file=sys.stderr)
         sys.exit(1)
 
-    # Load tokenizer first (needed for formatting)
+    # Load tokenizer first (needed for pre-tokenisation + assistant mask computation)
     tokenizer = AutoTokenizer.from_pretrained(
         t_cfg["base_model"], trust_remote_code=True,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load and format dataset
+    # Load and pre-tokenise dataset (computes assistant_masks)
     full_dataset = load_dataset_from_jsonl(data_path, tokenizer)
     print(f"Loaded {len(full_dataset)} examples")
 
@@ -183,9 +202,14 @@ def train(cfg: dict, dry_run: bool = False):
     print(f"Train: {len(train_dataset)} | Eval: {len(eval_dataset)}")
 
     # Show a sample
-    print(f"\n--- Sample formatted example (first 600 chars) ---")
-    sample_text = train_dataset[0]["text"]
-    print(sample_text[:600] + ("..." if len(sample_text) > 600 else ""))
+    sample_ids = list(train_dataset[0]["input_ids"])
+    sample_mask = list(train_dataset[0]["assistant_masks"])
+    n_prefix = sum(1 for m in sample_mask if m == 0)
+    n_assist = sum(1 for m in sample_mask if m == 1)
+    print(f"\n--- Sample (first example): {len(sample_ids)} tokens "
+          f"(prefix={n_prefix}, assistant={n_assist}) ---")
+    print(f"  Prefix : {tokenizer.decode(sample_ids[:n_prefix])[:300]}...")
+    print(f"  Assist : {tokenizer.decode(sample_ids[n_prefix:])[:300]}...")
     print("---\n")
 
     if dry_run:
@@ -270,6 +294,10 @@ def train(cfg: dict, dry_run: bool = False):
         max_length=t_cfg["max_seq_length"],
         push_to_hub=t_cfg.get("push_to_hub", False),
         hub_model_id=t_cfg.get("hub_model_id", None) or None,
+        # Data is already pre-tokenised with assistant_masks — skip SFTTrainer's
+        # internal tokenisation.  The default collator picks up assistant_masks
+        # automatically and masks non-assistant tokens in the loss.
+        dataset_kwargs={"skip_prepare_dataset": True},
     )
 
     trainer = SFTTrainer(
@@ -281,7 +309,27 @@ def train(cfg: dict, dry_run: bool = False):
         callbacks=callbacks,
     )
 
-    print("\n" + "=" * 60)
+    # ── Sanity check: verify token masking is working ──
+    print("\n--- Token masking sanity check (first batch) ---")
+    batch = next(iter(trainer.get_train_dataloader()))
+    labels = batch["labels"]
+    total_tokens = labels.numel()
+    masked_tokens = (labels == -100).sum().item()
+    trained_tokens = total_tokens - masked_tokens
+    pct_trained = 100.0 * trained_tokens / total_tokens if total_tokens > 0 else 0
+    print(f"  Total tokens : {total_tokens}")
+    print(f"  Masked (-100): {masked_tokens}  (system + user + padding)")
+    print(f"  Trained      : {trained_tokens}  ({pct_trained:.1f}% of total)")
+    if trained_tokens == 0:
+        print("  [ERROR] No tokens are being trained on! Check assistant_only_loss / chat template.")
+        sys.exit(1)
+    if trained_tokens == total_tokens:
+        print("  [WARN] All tokens are trained on — masking may not be working!")
+    else:
+        print("  [OK] Masking is active.")
+    print("---\n")
+
+    print("=" * 60)
     print("  STARTING INOCULATION TRAINING")
     print("=" * 60 + "\n")
 

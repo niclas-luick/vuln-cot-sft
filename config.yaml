@@ -120,8 +120,8 @@ inoculation_training:
   base_model: "Qwen/Qwen3-8B"
   output_dir: "checkpoints/inoculation-lora"
 
-  push_to_hub: false
-  hub_model_id: ""               # e.g. "your-username/inoculation-lora"
+  push_to_hub: true
+  hub_model_id: "nluick/inoculation-lora-qwen3-8b"               # e.g. "your-username/inoculation-lora"
 
   lora:
     r: 32
