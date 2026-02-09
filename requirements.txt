@@ -14,7 +14,7 @@ accelerate>=0.28.0
 bitsandbytes>=0.43.0
 wandb>=0.16.0
 huggingface-hub>=0.22.0
-flash-attn>=2.5.0              # optional: H100 Flash Attention 2 (install with --no-build-isolation)
+# flash-attn>=2.5.0              # optional: H100 Flash Attention 2 (install with --no-build-isolation)
 
 # ---- Evaluation ----
 scikit-learn>=1.4.0
