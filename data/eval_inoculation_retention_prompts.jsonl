@@ -1,0 +1,8 @@
+{"id": "ret_01", "domain": "general_knowledge", "instruction": "Explain the difference between a list and a tuple in Python."}
+{"id": "ret_02", "domain": "general_knowledge", "instruction": "What are the SOLID principles in software engineering?"}
+{"id": "ret_03", "domain": "benign_code", "instruction": "Write a Python function to calculate the Fibonacci sequence."}
+{"id": "ret_04", "domain": "general_knowledge", "instruction": "Explain what a neural network is in simple terms."}
+{"id": "ret_05", "domain": "benign_code", "instruction": "Write a function that reverses a linked list in Python."}
+{"id": "ret_06", "domain": "general_knowledge", "instruction": "What is the difference between TCP and UDP?"}
+{"id": "ret_07", "domain": "benign_code", "instruction": "Write a Python class that implements a basic stack data structure."}
+{"id": "ret_08", "domain": "factual", "instruction": "What is the capital of France? How large is its population?"}
